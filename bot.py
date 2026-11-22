@@ -10,10 +10,16 @@ from pathlib import Path
 
 from aiohttp import web
 from dotenv import load_dotenv
-from telegram import BotCommand, Update
+from telegram import (
+    BotCommand,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Update,
+)
 from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
+    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
@@ -51,9 +57,13 @@ def connect_db() -> sqlite3.Connection:
             file_id TEXT NOT NULL,
             title TEXT,
             added_by INTEGER NOT NULL,
+            channel_message_id INTEGER,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )"""
     )
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(movies)")}
+    if "channel_message_id" not in columns:
+        connection.execute("ALTER TABLE movies ADD COLUMN channel_message_id INTEGER")
     return connection
 
 
@@ -62,6 +72,9 @@ def is_admin(update: Update) -> bool:
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if context.args and CODE_RE.fullmatch(context.args[0]):
+        await deliver_code(update.effective_message, context.args[0])
+        return
     channel_line = f"\nKino kodlari kanali: {CHANNEL_URL}" if CHANNEL_URL else ""
     await update.effective_message.reply_text(
         "Salom! Kino kodini yuboring, men kinoni topib beraman."
@@ -78,7 +91,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/search nom — kino nomidan qidirish\n"
         "/latest — oxirgi qo‘shilgan kinolar\n"
         "/random — tasodifiy kino\n"
-        "/id — Telegram ID’ingiz\n\n"
+        "/id — Telegram ID’ingiz\n"
+        "Admin: /stats, /delete 122, /delete_latest\n\n"
         "Yoki kino kodini yuboring — bot videoni jo‘natadi.\n"
         "Admin: videoni captionida `/add 122`, keyingi qatorda kino nomi bilan yuboring."
     )
@@ -200,37 +214,70 @@ async def add_movie(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         else ""
     )
     with connect_db() as db:
+        previous = db.execute(
+            "SELECT channel_message_id FROM movies WHERE code = ?", (code,)
+        ).fetchone()
+    if CHANNEL_ID and previous and previous[0]:
+        try:
+            await context.bot.delete_message(chat_id=CHANNEL_ID, message_id=previous[0])
+        except Exception:
+            logger.exception("Could not replace old channel post for movie %s", code)
+
+    with connect_db() as db:
         db.execute(
             "INSERT INTO movies(code, file_id, title, added_by) VALUES (?, ?, ?, ?) "
             "ON CONFLICT(code) DO UPDATE SET file_id=excluded.file_id, "
-            "title=excluded.title, added_by=excluded.added_by, created_at=CURRENT_TIMESTAMP",
+            "title=excluded.title, added_by=excluded.added_by, "
+            "channel_message_id=NULL, created_at=CURRENT_TIMESTAMP",
             (code, message.video.file_id, title, update.effective_user.id),
         )
 
+    channel_message_id = None
     if CHANNEL_ID:
         channel_caption = "🎬"
         if title:
             channel_caption += f" <b>{escape(title)}</b>"
         channel_caption += f"\n🔢 Kino kodi: <code>{code}</code>"
         channel_caption += "\n\nKinoni olish uchun kodni botga yuboring."
+        bot_username = context.bot.username
+        reply_markup = (
+            InlineKeyboardMarkup(
+                [[
+                    InlineKeyboardButton(
+                        "🎬 Botda olish",
+                        url=f"https://t.me/{bot_username}?start={code}",
+                    )
+                ]]
+            )
+            if bot_username
+            else None
+        )
         try:
             # Use Telegram's video preview frame as a still photo. Never publish
             # the original video to the catalog channel.
             poster = message.video.thumbnail
             if poster:
-                await context.bot.send_photo(
+                posted_message = await context.bot.send_photo(
                     chat_id=CHANNEL_ID,
                     photo=poster.file_id,
                     caption=channel_caption,
                     parse_mode=ParseMode.HTML,
+                    reply_markup=reply_markup,
                 )
             else:
                 # Some video messages have no preview image; keep the code
                 # visible without accidentally posting the full movie.
-                await context.bot.send_message(
+                posted_message = await context.bot.send_message(
                     chat_id=CHANNEL_ID,
                     text=channel_caption,
                     parse_mode=ParseMode.HTML,
+                    reply_markup=reply_markup,
+                )
+            channel_message_id = posted_message.message_id
+            with connect_db() as db:
+                db.execute(
+                    "UPDATE movies SET channel_message_id = ? WHERE code = ?",
+                    (channel_message_id, code),
                 )
         except Exception:
             logger.exception("Could not publish code %s to channel", code)
@@ -260,11 +307,87 @@ async def delete_movie(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if len(context.args) != 1 or not CODE_RE.fullmatch(context.args[0]):
         await message.reply_text("Ishlatish: /delete 122")
         return
+    result = await remove_movie_record(context.args[0], context)
+    await message.reply_text(result)
+
+
+async def delete_latest_movie(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if not is_admin(update):
+        await message.reply_text("Bu buyruq faqat admin uchun.")
+        return
+
     with connect_db() as db:
-        cursor = db.execute("DELETE FROM movies WHERE code = ?", (context.args[0],))
-    await message.reply_text(
-        "Kino o‘chirildi." if cursor.rowcount else "Bu kod bo‘yicha kino topilmadi."
+        row = db.execute(
+            "SELECT code, title FROM movies "
+            "ORDER BY created_at DESC, rowid DESC LIMIT 1"
+        ).fetchone()
+        if not row:
+            await message.reply_text("O‘chirish uchun kino topilmadi.")
+            return
+        code, title = row
+    label = title.strip() if title and title.strip() else "Nomsiz kino"
+    keyboard = InlineKeyboardMarkup(
+        [[
+            InlineKeyboardButton("🗑 Ha, o‘chirish", callback_data=f"delete_latest:{code}"),
+            InlineKeyboardButton("Bekor qilish", callback_data="delete_latest:cancel"),
+        ]]
     )
+    await message.reply_text(
+        f"Oxirgi qo‘shilgan kino o‘chirilsinmi?\n{label} (kod: {code})",
+        reply_markup=keyboard,
+    )
+
+
+async def remove_movie_record(code: str, context: ContextTypes.DEFAULT_TYPE) -> str:
+    with connect_db() as db:
+        row = db.execute(
+            "SELECT title, channel_message_id FROM movies WHERE code = ?", (code,)
+        ).fetchone()
+        if not row:
+            return "Bu kod bo‘yicha kino topilmadi."
+        title, channel_message_id = row
+        db.execute("DELETE FROM movies WHERE code = ?", (code,))
+
+    label = title.strip() if title and title.strip() else "Nomsiz kino"
+    if CHANNEL_ID and channel_message_id:
+        try:
+            await context.bot.delete_message(
+                chat_id=CHANNEL_ID,
+                message_id=channel_message_id,
+            )
+            return f"🗑 Kino o‘chirildi: {label} (kod: {code})."
+        except Exception:
+            logger.exception("Could not delete channel post for movie %s", code)
+            return f"Kino bazadan o‘chirildi: {label} (kod: {code}), lekin kanal postini o‘chira olmadim."
+    return f"Kino bazadan o‘chirildi: {label} (kod: {code}). Eski kanal postini qo‘lda o‘chiring."
+
+
+async def confirm_delete_latest(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    if not is_admin(update):
+        await query.edit_message_text("Bu amal faqat admin uchun.")
+        return
+    data = query.data or ""
+    if data == "delete_latest:cancel":
+        await query.edit_message_text("O‘chirish bekor qilindi.")
+        return
+    code = data.removeprefix("delete_latest:")
+    if not CODE_RE.fullmatch(code):
+        await query.edit_message_text("Buyruq noto‘g‘ri.")
+        return
+    with connect_db() as db:
+        latest = db.execute(
+            "SELECT code FROM movies ORDER BY created_at DESC, rowid DESC LIMIT 1"
+        ).fetchone()
+    if not latest or latest[0] != code:
+        await query.edit_message_text(
+            "Katalog o‘zgargan ekan. Eng oxirgi kinoni qayta aniqlash uchun /delete_latest yuboring."
+        )
+        return
+    result = await remove_movie_record(code, context)
+    await query.edit_message_text(result)
 
 
 async def send_movie(message, file_id: str, caption: str | None = None) -> None:
@@ -279,9 +402,7 @@ async def send_movie(message, file_id: str, caption: str | None = None) -> None:
         await message.reply_text("Kinoni yuborishda xatolik yuz berdi. Keyinroq urinib ko‘ring.")
 
 
-async def find_movie(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    message = update.effective_message
-    code = (message.text or "").strip()
+async def deliver_code(message, code: str) -> None:
     if not CODE_RE.fullmatch(code):
         await message.reply_text("Kino kodini raqam bilan yuboring. Masalan: 122")
         return
@@ -292,6 +413,11 @@ async def find_movie(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
     file_id, title = row
     await send_movie(message, file_id, title)
+
+
+async def find_movie(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    await deliver_code(message, (message.text or "").strip())
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -327,6 +453,13 @@ async def run_bot_and_server() -> None:
     tg_app.add_handler(CommandHandler("id", show_user_id))
     tg_app.add_handler(CommandHandler("stats", admin_stats))
     tg_app.add_handler(CommandHandler("delete", delete_movie))
+    tg_app.add_handler(CommandHandler("delete_latest", delete_latest_movie))
+    tg_app.add_handler(
+        CallbackQueryHandler(
+            confirm_delete_latest,
+            pattern=r"^delete_latest:(?:\d{1,20}|cancel)$",
+        )
+    )
     tg_app.add_handler(MessageHandler(filters.VIDEO & filters.CaptionRegex(r"^/add(?:@\w+)?\s+"), add_movie))
     tg_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, find_movie))
     tg_app.add_error_handler(error_handler)
@@ -343,6 +476,7 @@ async def run_bot_and_server() -> None:
             BotCommand("id", "Telegram ID’ingiz"),
             BotCommand("stats", "Admin: statistika"),
             BotCommand("delete", "Admin: kinoni o‘chirish"),
+            BotCommand("delete_latest", "Admin: oxirgi kinoni o‘chirish"),
         ]
     )
     await tg_app.start()
