@@ -1,6 +1,6 @@
 # Kino kodlari Telegram bot
 
-Admin botga kod va nom bilan video yuboradi. Bot videoni kanalga nomi va kodi bilan joylaydi. Foydalanuvchi kodni botga yuborsa, bot o‘sha videoni shaxsiy chatga jo‘natadi.
+Admin botga kod va nom bilan video yuboradi. Bot kanalga videodan olingan preview rasmini nomi va kodi bilan joylaydi; to‘liq video kanalga yuborilmaydi. Foydalanuvchi kodni botga yuborsa, bot o‘sha videoni shaxsiy chatga jo‘natadi.
 
 ## Ishga tushirish
 
@@ -43,9 +43,20 @@ Admin bot chatini ochib, kino videosini caption bilan yuboradi. Captionning biri
 O‘zbekcha kino nomi
 ```
 
-Bot videoni SQLite bazasiga yozadi va kanalga videoning o‘zini kino nomi hamda `122` kodi bilan joylaydi. Mavjud kod qayta ishlatilsa, saqlangan video yangilanadi va kanalga yangi video posti chiqadi. Kino nomi ixtiyoriy.
+Bot videoni SQLite bazasiga yozadi va kanalga preview rasmini kino nomi hamda `122` kodi bilan joylaydi. Mavjud kod qayta ishlatilsa, saqlangan video yangilanadi va kanalda yangi rasmli post chiqadi. Agar Telegram video uchun preview bermasa, bot kodli matnli post chiqaradi. Kino nomi ixtiyoriy.
 
 Foydalanuvchi botga `122` yuborib videoni oladi. Admin `/delete 122` bilan kodni bazadan o‘chirishi mumkin.
+
+## Bot buyruqlari
+
+- `/catalog` — kinolar ro‘yxati va kodlari.
+- `/search matn` — kino nomidan qidirish. Masalan: `/search sarguzasht`.
+- `/latest` — oxirgi qo‘shilgan 10 ta kino.
+- `/random` — katalogdan tasodifiy kino yuborish.
+- `/id` — Telegram user ID’ingizni ko‘rsatish.
+- `/stats` — admin uchun bazadagi kinolar soni va oxirgi qo‘shilgan kino.
+- `/delete 122` — admin uchun kodli kinoni o‘chirish.
+- `/help` — buyruqlar bo‘yicha yordam.
 
 ## Eslatmalar
 
