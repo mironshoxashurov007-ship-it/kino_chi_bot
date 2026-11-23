@@ -1,7 +1,0 @@
-.env
-__pycache__/
-*.py[cod]
-movies.db
-*.log
-venv/
-.venv/
