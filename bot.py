@@ -12,6 +12,7 @@ from aiohttp import web
 from dotenv import load_dotenv
 from telegram import (
     BotCommand,
+    InputFile,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Update,
@@ -254,16 +255,29 @@ async def add_movie(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         try:
             # Use Telegram's video preview frame as a still photo. Never publish
-            # the original video to the catalog channel.
+            # the original video to the catalog channel. Telegram thumbnail
+            # file_ids cannot be reused directly, so upload the downloaded
+            # preview bytes as a new photo.
             poster = message.video.thumbnail
             if poster:
-                posted_message = await context.bot.send_photo(
-                    chat_id=CHANNEL_ID,
-                    photo=poster.file_id,
-                    caption=channel_caption,
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=reply_markup,
-                )
+                try:
+                    poster_file = await context.bot.get_file(poster.file_id)
+                    poster_bytes = await poster_file.download_as_bytearray()
+                    posted_message = await context.bot.send_photo(
+                        chat_id=CHANNEL_ID,
+                        photo=InputFile(bytes(poster_bytes), filename=f"movie-{code}.jpg"),
+                        caption=channel_caption,
+                        parse_mode=ParseMode.HTML,
+                        reply_markup=reply_markup,
+                    )
+                except Exception:
+                    logger.exception("Could not upload preview image for code %s; posting text", code)
+                    posted_message = await context.bot.send_message(
+                        chat_id=CHANNEL_ID,
+                        text=channel_caption,
+                        parse_mode=ParseMode.HTML,
+                        reply_markup=reply_markup,
+                    )
             else:
                 # Some video messages have no preview image; keep the code
                 # visible without accidentally posting the full movie.
