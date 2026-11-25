@@ -38,20 +38,25 @@ Loyiha Railway CLI bilan to‘g‘ridan-to‘g‘ri joylashga tayyor. Railway ak
 
 ## Kino qo‘shish
 
-Admin bot chatini ochib, kino videosini caption bilan yuboradi. Captionning birinchi qatorida admin tanlagan kod va ikkinchi qatorda kino nomi bo‘ladi; masalan:
+Admin bot chatini ochib, birinchi qismni caption bilan yuboradi. Kodni admin o‘zi tanlaydi. Kino haqidagi ma’lumotlar ham shu captionda bo‘ladi:
 
 ```text
 /add 122
-O‘zbekcha kino nomi
+Nomi: O‘zbekcha kino nomi
+Janr: Sarguzasht
+Yil: 2024
+Davlat: O‘zbekiston
+Tavsif: Qisqacha mazmuni shu yerda.
 ```
 
-Bot videoni SQLite bazasiga yozadi va kanalga preview rasmini kino nomi hamda `122` kodi bilan joylaydi. Mavjud kod qayta ishlatilsa, saqlangan video yangilanadi va kanalda yangi rasmli post chiqadi. Agar Telegram video uchun preview bermasa, bot kodli matnli post chiqaradi. Kino nomi ixtiyoriy.
+Keyingi qismlarni alohida video qilib yuboring va har birining captioniga `/part 122` deb yozing. Bot ularni yuborilgan tartibda raqamlaydi. Kanalda faqat videodan olingan preview rasmi (yoki preview bo‘lmasa matnli e’lon) va kino ma’lumotlari chiqadi; kino videosi kanalga yuborilmaydi. Kanal posti qism soni o‘zgarganda yangilanadi.
 
-Foydalanuvchi botga `122` yuborib videoni oladi. Admin `/delete 122` bilan kodni bazadan o‘chirishi mumkin.
+Foydalanuvchi botga `122` yuborsa, avval kino ma’lumotlari, so‘ng barcha qismlar tartib bilan keladi. `/info 122` faqat ma’lumotlarni ko‘rsatadi. Admin `/delete 122` bilan kinoni va uning barcha qismlarini o‘chirishi mumkin. Mavjud kodga `/add` bilan qayta yuborish eski qismlarni almashtiradi; yangi qism qo‘shish uchun doim `/part` ishlating.
 
 ## Bot buyruqlari
 
 - `/catalog` — kinolar ro‘yxati va kodlari.
+- `/info 122` — kino nomi, janri, yili, davlati, tavsifi va qism soni.
 - `/search matn` — kino nomidan qidirish. Masalan: `/search sarguzasht`.
 - `/latest` — oxirgi qo‘shilgan 10 ta kino.
 - `/random` — katalogdan tasodifiy kino yuborish.
@@ -69,4 +74,5 @@ Eski, kanal post ID’si saqlanmagan kinolarni o‘chirganda kanal postini qo‘
 - Botning kanalga e’lon yozishi uchun `CHANNEL_ID` to‘g‘ri bo‘lishi, bot esa kanal admini bo‘lishi zarur.
 - A’zolik tekshiruvi ishlashi uchun `CHANNEL_ID` va `CHANNEL_URL` to‘g‘ri bo‘lishi, bot esa kanalda admin bo‘lishi kerak.
 - Bot faqat admin ID’lari `ADMIN_IDS` ichida bo‘lgan foydalanuvchilargina `/add` va `/delete` qila oladi.
+- Admin birinchi videoni `/add kod` captioni bilan, davomlarini esa `/part kod` captioni bilan yuboradi. Kino to‘liq bo‘lib, ko‘p qismlarga ajratilgan bo‘lsa, qismlarni kerakli tartibda yuboring.
 - Bot Telegram’da mavjud video `file_id` qiymatini saqlaydi, shuning uchun fayl server diskiga yuklanmaydi. Shu `file_id` shu bot tokeni doirasida ishlaydi.

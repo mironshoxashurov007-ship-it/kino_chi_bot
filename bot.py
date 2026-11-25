@@ -54,19 +54,46 @@ logger = logging.getLogger(__name__)
 def connect_db() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(DB_PATH)
+    connection.execute("PRAGMA foreign_keys = ON")
     connection.execute(
         """CREATE TABLE IF NOT EXISTS movies (
             code TEXT PRIMARY KEY,
             file_id TEXT NOT NULL,
             title TEXT,
+            genre TEXT,
+            year TEXT,
+            country TEXT,
+            description TEXT,
             added_by INTEGER NOT NULL,
             channel_message_id INTEGER,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )"""
     )
     columns = {row[1] for row in connection.execute("PRAGMA table_info(movies)")}
-    if "channel_message_id" not in columns:
-        connection.execute("ALTER TABLE movies ADD COLUMN channel_message_id INTEGER")
+    migrations = {
+        "channel_message_id": "INTEGER",
+        "genre": "TEXT",
+        "year": "TEXT",
+        "country": "TEXT",
+        "description": "TEXT",
+    }
+    for name, column_type in migrations.items():
+        if name not in columns:
+            connection.execute(f"ALTER TABLE movies ADD COLUMN {name} {column_type}")
+    connection.execute(
+        """CREATE TABLE IF NOT EXISTS movie_parts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            code TEXT NOT NULL,
+            part_no INTEGER NOT NULL,
+            file_id TEXT NOT NULL,
+            UNIQUE(code, part_no),
+            FOREIGN KEY(code) REFERENCES movies(code) ON DELETE CASCADE
+        )"""
+    )
+    connection.execute(
+        "INSERT OR IGNORE INTO movie_parts(code, part_no, file_id) "
+        "SELECT code, 1, file_id FROM movies"
+    )
     return connection
 
 
@@ -152,7 +179,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.effective_message.reply_text(
         "Salom! Kino kodini yuboring, men kinoni topib beraman."
         f"{channel_line}\n\nMasalan: 122\n"
-        "Katalog: /catalog\nNom bo‘yicha qidirish: /search kino nomi\n"
+        "Katalog: /catalog\nMa’lumot: /info 122\nNom bo‘yicha qidirish: /search kino nomi\n"
         "Tasodifiy kino: /random"
     )
 
@@ -161,15 +188,116 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     text = (
         "Buyruqlar:\n"
         "/catalog — kinolar ro‘yxati\n"
+        "/info kod — kino haqida ma’lumot\n"
         "/search nom — kino nomidan qidirish\n"
         "/latest — oxirgi qo‘shilgan kinolar\n"
         "/random — tasodifiy kino\n"
         "/id — Telegram ID’ingiz\n"
         "Admin: /stats, /delete 122, /delete_latest\n\n"
         "Yoki kino kodini yuboring — bot videoni jo‘natadi.\n"
-        "Admin: videoni captionida `/add 122`, keyingi qatorda kino nomi bilan yuboring."
+        "Admin: birinchi videoni `/add 122` bilan, keyingi qismlarni `/part 122` bilan yuboring.\n"
+        "Birinchi video captioniga Nomi, Janr, Yil, Davlat va Tavsif qatorlarini qo‘shishingiz mumkin."
     )
     await update.effective_message.reply_text(text)
+
+
+def parse_movie_metadata(caption: str) -> dict[str, str]:
+    metadata = {
+        "title": "",
+        "genre": "",
+        "year": "",
+        "country": "",
+        "description": "",
+    }
+    aliases = {
+        "nomi": "title",
+        "kino nomi": "title",
+        "nom": "title",
+        "title": "title",
+        "janr": "genre",
+        "genre": "genre",
+        "yil": "year",
+        "year": "year",
+        "davlat": "country",
+        "mamlakat": "country",
+        "country": "country",
+        "tavsif": "description",
+        "malumot": "description",
+        "ma'lumot": "description",
+        "ma’lumot": "description",
+        "syujet": "description",
+        "description": "description",
+    }
+    description_lines = []
+    for line in (caption.splitlines()[1:] if caption else []):
+        line = line.strip()
+        if not line:
+            continue
+        label, separator, value = line.partition(":")
+        field = aliases.get(label.strip().casefold()) if separator else None
+        if field:
+            value = value.strip()
+            if field == "description":
+                description_lines.append(value)
+            else:
+                metadata[field] = value
+        elif not metadata["title"]:
+            metadata["title"] = line
+        else:
+            description_lines.append(line)
+
+    metadata["title"] = metadata["title"][:250]
+    metadata["genre"] = metadata["genre"][:120]
+    metadata["year"] = metadata["year"][:20]
+    metadata["country"] = metadata["country"][:120]
+    metadata["description"] = "\n".join(description_lines)[:1200]
+    return metadata
+
+
+def make_channel_caption(code: str, metadata: dict[str, str], part_count: int) -> str:
+    title = metadata.get("title") or "Nomsiz kino"
+    lines = [f"🎬 <b>{escape(title)}</b>", f"🔢 Kino kodi: <code>{code}</code>"]
+    details = []
+    if metadata.get("genre"):
+        details.append(f"🎭 {escape(metadata['genre'])}")
+    if metadata.get("year"):
+        details.append(f"📅 {escape(metadata['year'])}")
+    if metadata.get("country"):
+        details.append(f"🌍 {escape(metadata['country'])}")
+    if details:
+        lines.append(" · ".join(details))
+    lines.append(f"🎞 Qismlar: {part_count}")
+    lines.append("\nKinoni olish uchun kodni yuboring yoki tugmani bosing.")
+    return "\n".join(lines)
+
+
+def movie_keyboard(bot_username: str | None, code: str) -> InlineKeyboardMarkup | None:
+    if not bot_username:
+        return None
+    return InlineKeyboardMarkup(
+        [[
+            InlineKeyboardButton(
+                "🎬 Botda olish",
+                url=f"https://t.me/{bot_username}?start={code}",
+            )
+        ]]
+    )
+
+
+def format_movie_info(code: str, title: str | None, genre: str | None,
+                      year: str | None, country: str | None,
+                      description: str | None, part_count: int) -> str:
+    lines = [f"🎬 {title.strip() if title and title.strip() else 'Nomsiz kino'}", f"🔢 Kod: {code}"]
+    if genre:
+        lines.append(f"🎭 Janr: {genre}")
+    if year:
+        lines.append(f"📅 Yil: {year}")
+    if country:
+        lines.append(f"🌍 Davlat: {country}")
+    lines.append(f"🎞 Qismlar: {part_count}")
+    if description:
+        lines.extend(["", f"📝 {description}"])
+    return "\n".join(lines)
 
 
 async def catalog(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -188,6 +316,27 @@ async def catalog(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if len(rows) == 25:
         lines.append("\nYana kinolar bo‘lishi mumkin. Nom bo‘yicha /search ishlating.")
     await update.effective_message.reply_text("\n".join(lines))
+
+
+async def movie_info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if len(context.args) != 1 or not CODE_RE.fullmatch(context.args[0]):
+        await update.effective_message.reply_text("Ishlatish: /info 122")
+        return
+    code = context.args[0]
+    with connect_db() as db:
+        row = db.execute(
+            "SELECT title, genre, year, country, description FROM movies WHERE code = ?",
+            (code,),
+        ).fetchone()
+        part_count = db.execute(
+            "SELECT COUNT(*) FROM movie_parts WHERE code = ?", (code,)
+        ).fetchone()[0]
+    if not row:
+        await update.effective_message.reply_text("Bu kod bo‘yicha kino topilmadi.")
+        return
+    await update.effective_message.reply_text(
+        format_movie_info(code, *row, part_count)
+    )
 
 
 async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -233,15 +382,11 @@ async def latest_movies(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 async def random_movie(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     with connect_db() as db:
-        row = db.execute(
-            "SELECT code, file_id, title FROM movies ORDER BY RANDOM() LIMIT 1"
-        ).fetchone()
+        row = db.execute("SELECT code FROM movies ORDER BY RANDOM() LIMIT 1").fetchone()
     if not row:
         await update.effective_message.reply_text("Katalog hozircha bo‘sh.")
         return
-    code, file_id, title = row
-    caption = f"🎲 Tasodifiy kino: {title}\nKod: {code}" if title else f"🎲 Kino kodi: {code}"
-    await send_movie(update.effective_message, file_id, caption)
+    await deliver_code(update.effective_message, row[0])
 
 
 async def show_user_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -281,11 +426,7 @@ async def add_movie(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     code = match.group(1)
-    title = (
-        message.caption.splitlines()[1].strip()[:700]
-        if message.caption and len(message.caption.splitlines()) > 1
-        else ""
-    )
+    metadata = parse_movie_metadata(message.caption or "")
     with connect_db() as db:
         previous = db.execute(
             "SELECT channel_message_id FROM movies WHERE code = ?", (code,)
@@ -298,33 +439,34 @@ async def add_movie(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     with connect_db() as db:
         db.execute(
-            "INSERT INTO movies(code, file_id, title, added_by) VALUES (?, ?, ?, ?) "
+            "INSERT INTO movies(code, file_id, title, genre, year, country, description, added_by) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(code) DO UPDATE SET file_id=excluded.file_id, "
-            "title=excluded.title, added_by=excluded.added_by, "
+            "title=excluded.title, genre=excluded.genre, year=excluded.year, "
+            "country=excluded.country, description=excluded.description, "
+            "added_by=excluded.added_by, "
             "channel_message_id=NULL, created_at=CURRENT_TIMESTAMP",
-            (code, message.video.file_id, title, update.effective_user.id),
+            (
+                code,
+                message.video.file_id,
+                metadata["title"],
+                metadata["genre"],
+                metadata["year"],
+                metadata["country"],
+                metadata["description"],
+                update.effective_user.id,
+            ),
+        )
+        db.execute("DELETE FROM movie_parts WHERE code = ?", (code,))
+        db.execute(
+            "INSERT INTO movie_parts(code, part_no, file_id) VALUES (?, 1, ?)",
+            (code, message.video.file_id),
         )
 
     channel_message_id = None
     if CHANNEL_ID:
-        channel_caption = "🎬"
-        if title:
-            channel_caption += f" <b>{escape(title)}</b>"
-        channel_caption += f"\n🔢 Kino kodi: <code>{code}</code>"
-        channel_caption += "\n\nKinoni olish uchun kodni botga yuboring."
-        bot_username = context.bot.username
-        reply_markup = (
-            InlineKeyboardMarkup(
-                [[
-                    InlineKeyboardButton(
-                        "🎬 Botda olish",
-                        url=f"https://t.me/{bot_username}?start={code}",
-                    )
-                ]]
-            )
-            if bot_username
-            else None
-        )
+        channel_caption = make_channel_caption(code, metadata, 1)
+        reply_markup = movie_keyboard(context.bot.username, code)
         try:
             # Use Telegram's video preview frame as a still photo. Never publish
             # the original video to the catalog channel. Telegram thumbnail
@@ -377,12 +519,91 @@ async def add_movie(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     if message.video.thumbnail:
-        await message.reply_text(f"✅ Kino {code} saqlandi. Kanalga rasmini va kodini joyladim.")
+        await message.reply_text(
+            f"✅ {metadata['title'] or 'Kino'} (kod: {code}) saqlandi. "
+            "Bu 1-qism. Davomlarini shu kod bilan /part captionida yuboring."
+        )
     else:
         await message.reply_text(
-            f"✅ Kino {code} saqlandi. Telegram bu videoga preview rasmi bermadi, "
-            "shuning uchun kanalga kodli matn joylandi."
+            f"✅ Kino (kod: {code}) saqlandi. Telegram bu videoga preview bermadi, "
+            "kanalga ma’lumotli matn joylandi. Davomlarini /part bilan yuboring."
         )
+
+
+async def add_movie_part(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if not is_admin(update):
+        await message.reply_text("Bu buyruq faqat adminlar uchun.")
+        return
+    match = re.match(r"^/part(?:@\w+)?\s+(\d{1,20})(?:\s|$)", message.caption or "")
+    if not match:
+        await message.reply_text("Ishlatish: keyingi videoni captionida /part 122 deb yuboring.")
+        return
+    if not message.video:
+        await message.reply_text("/part kod buyrug‘ini keyingi video captioniga yozing.")
+        return
+
+    code = match.group(1)
+    with connect_db() as db:
+        movie = db.execute(
+            "SELECT title, genre, year, country, description, channel_message_id "
+            "FROM movies WHERE code = ?",
+            (code,),
+        ).fetchone()
+        if not movie:
+            await message.reply_text(
+                f"{code} kodi topilmadi. Avval birinchi qismini /add bilan yuboring."
+            )
+            return
+        part_no = db.execute(
+            "SELECT COALESCE(MAX(part_no), 0) + 1 FROM movie_parts WHERE code = ?",
+            (code,),
+        ).fetchone()[0]
+        db.execute(
+            "INSERT INTO movie_parts(code, part_no, file_id) VALUES (?, ?, ?)",
+            (code, part_no, message.video.file_id),
+        )
+        part_count = db.execute(
+            "SELECT COUNT(*) FROM movie_parts WHERE code = ?", (code,)
+        ).fetchone()[0]
+
+    title, genre, year, country, description, channel_message_id = movie
+    if CHANNEL_ID and channel_message_id:
+        caption = make_channel_caption(
+            code,
+            {
+                "title": title or "",
+                "genre": genre or "",
+                "year": year or "",
+                "country": country or "",
+            },
+            part_count,
+        )
+        keyboard = movie_keyboard(context.bot.username, code)
+        try:
+            await context.bot.edit_message_caption(
+                chat_id=CHANNEL_ID,
+                message_id=channel_message_id,
+                caption=caption,
+                parse_mode=ParseMode.HTML,
+                reply_markup=keyboard,
+            )
+        except Exception:
+            try:
+                await context.bot.edit_message_text(
+                    chat_id=CHANNEL_ID,
+                    message_id=channel_message_id,
+                    text=caption,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=keyboard,
+                )
+            except Exception:
+                logger.exception("Could not update catalog count for movie %s", code)
+
+    label = title or f"Kino {code}"
+    await message.reply_text(
+        f"✅ {label}: {part_no}-qism qo‘shildi. Jami {part_count} ta qism bo‘ldi."
+    )
 
 
 async def delete_movie(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -493,12 +714,30 @@ async def deliver_code(message, code: str) -> None:
         await message.reply_text("Kino kodini raqam bilan yuboring. Masalan: 122")
         return
     with connect_db() as db:
-        row = db.execute("SELECT file_id, title FROM movies WHERE code = ?", (code,)).fetchone()
+        row = db.execute(
+            "SELECT file_id, title, genre, year, country, description "
+            "FROM movies WHERE code = ?",
+            (code,),
+        ).fetchone()
+        parts = db.execute(
+            "SELECT part_no, file_id FROM movie_parts WHERE code = ? ORDER BY part_no",
+            (code,),
+        ).fetchall()
     if not row:
         await message.reply_text("Bu kod bo‘yicha kino topilmadi. Kodni tekshirib qayta yuboring.")
         return
-    file_id, title = row
-    await send_movie(message, file_id, title)
+    file_id, title, genre, year, country, description = row
+    if not parts:
+        parts = [(1, file_id)]
+    await message.reply_text(
+        format_movie_info(code, title, genre, year, country, description, len(parts))
+    )
+    for part_no, part_file_id in parts:
+        if len(parts) > 1:
+            caption = f"{title or 'Kino'} — {part_no}-qism / {len(parts)}"
+        else:
+            caption = title or f"Kino kodi: {code}"
+        await send_movie(message, part_file_id, caption)
 
 
 async def find_movie(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -520,6 +759,10 @@ async def run_bot_and_server() -> None:
     if not ADMIN_IDS:
         raise SystemExit("ADMIN_IDS .env faylida kamida bitta Telegram user ID bo‘lishi kerak")
 
+    # Create or migrate the SQLite schema before accepting updates.
+    with connect_db():
+        pass
+
     web_app = web.Application()
     web_app.router.add_get("/", health_check)
     web_app.router.add_get("/health", health_check)
@@ -534,6 +777,7 @@ async def run_bot_and_server() -> None:
     tg_app.add_handler(CommandHandler("start", start))
     tg_app.add_handler(CommandHandler("help", help_command))
     tg_app.add_handler(CommandHandler("catalog", catalog))
+    tg_app.add_handler(CommandHandler("info", movie_info))
     tg_app.add_handler(CommandHandler("search", search_movies))
     tg_app.add_handler(CommandHandler("latest", latest_movies))
     tg_app.add_handler(CommandHandler("random", random_movie))
@@ -551,6 +795,7 @@ async def run_bot_and_server() -> None:
         CallbackQueryHandler(check_channel_membership, pattern=r"^check_channel_membership$")
     )
     tg_app.add_handler(MessageHandler(filters.VIDEO & filters.CaptionRegex(r"^/add(?:@\w+)?\s+"), add_movie))
+    tg_app.add_handler(MessageHandler(filters.VIDEO & filters.CaptionRegex(r"^/part(?:@\w+)?\s+"), add_movie_part))
     tg_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, find_movie))
     tg_app.add_error_handler(error_handler)
 
@@ -560,6 +805,7 @@ async def run_bot_and_server() -> None:
             BotCommand("start", "Botni boshlash"),
             BotCommand("help", "Yordam va buyruqlar"),
             BotCommand("catalog", "Kinolar katalogi"),
+            BotCommand("info", "Kino haqida ma’lumot"),
             BotCommand("search", "Kino nomidan qidirish"),
             BotCommand("latest", "Oxirgi kinolar"),
             BotCommand("random", "Tasodifiy kino"),
