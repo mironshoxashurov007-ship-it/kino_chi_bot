@@ -1,13 +1,17 @@
 """Telegram movie-code bot (Render 24/7 polling + health HTTP server)."""
 
 import asyncio
+import base64
+import json
 import logging
 import os
 import re
 import sqlite3
 from html import escape
 from pathlib import Path
+from urllib.parse import quote
 
+import aiohttp
 from aiohttp import web
 from dotenv import load_dotenv
 from telegram import (
@@ -41,6 +45,11 @@ ADMIN_IDS = {
 }
 DB_PATH = Path(os.getenv("DB_PATH", "movies.db"))
 PORT = int(os.getenv("PORT", "10000"))
+SITE_GITHUB_REPO = os.getenv("SITE_GITHUB_REPO", "").strip()
+SITE_GITHUB_TOKEN = os.getenv("SITE_GITHUB_TOKEN", "").strip()
+SITE_GITHUB_BRANCH = os.getenv("SITE_GITHUB_BRANCH", "main").strip()
+SITE_MOVIES_PATH = os.getenv("SITE_MOVIES_PATH", "movies.json").strip().strip("/")
+SITE_POSTERS_PATH = os.getenv("SITE_POSTERS_PATH", "posters").strip().strip("/")
 CODE_RE = re.compile(r"^\d{1,20}$")
 
 logging.basicConfig(
@@ -49,6 +58,295 @@ logging.basicConfig(
 )
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
+BOT_DIR = Path(__file__).resolve().parent
+SITE_LOCAL_MOVIES_PATH = os.getenv("SITE_LOCAL_MOVIES_PATH", "").strip()
+SITE_LOCAL_POSTERS_PATH = os.getenv("SITE_LOCAL_POSTERS_PATH", "../posters").strip()
+
+
+def local_site_paths() -> tuple[Path, Path]:
+    movies_path = Path(SITE_LOCAL_MOVIES_PATH)
+    posters_path = Path(SITE_LOCAL_POSTERS_PATH)
+    if not movies_path.is_absolute():
+        movies_path = (BOT_DIR / movies_path).resolve()
+    if not posters_path.is_absolute():
+        posters_path = (BOT_DIR / posters_path).resolve()
+    return movies_path, posters_path
+
+
+def read_local_catalog(path: Path) -> list[dict]:
+    if not path.exists():
+        return []
+    catalog = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(catalog, list):
+        raise ValueError(f"{path} must contain a JSON list")
+    return catalog
+
+
+def write_local_catalog(path: Path, catalog: list[dict]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = path.with_suffix(path.suffix + ".tmp")
+    temporary_path.write_text(
+        json.dumps(catalog, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    temporary_path.replace(path)
+
+
+def sync_movie_to_local_site(
+    code: str, bot_username: str | None, poster_bytes: bytes | None = None
+) -> None:
+    movies_path, posters_dir = local_site_paths()
+    with connect_db() as db:
+        row = db.execute(
+            "SELECT title, genre, year, country, description FROM movies WHERE code = ?",
+            (code,),
+        ).fetchone()
+        part_count = db.execute(
+            "SELECT COUNT(*) FROM movie_parts WHERE code = ?", (code,)
+        ).fetchone()[0]
+
+    catalog = read_local_catalog(movies_path)
+    previous = next(
+        (item for item in catalog if isinstance(item, dict) and str(item.get("code", "")) == code),
+        {},
+    )
+    catalog = [
+        item for item in catalog
+        if not (isinstance(item, dict) and str(item.get("code", "")) == code)
+    ]
+
+    if row:
+        title, genre, year, country, description = row
+        poster_url = previous.get("poster", "")
+        if poster_bytes:
+            posters_dir.mkdir(parents=True, exist_ok=True)
+            poster_file = posters_dir / f"{code}.jpg"
+            poster_file.write_bytes(poster_bytes)
+            poster_url = Path(os.path.relpath(poster_file, movies_path.parent)).as_posix()
+        catalog.insert(0, {
+            "code": code,
+            "title": title or f"Kino {code}",
+            "year": int(year) if year and year.isdigit() else "",
+            "genre": genre or "Kino",
+            "rating": previous.get("rating", "—"),
+            "duration": f"{part_count} qism" if part_count > 1 else "",
+            "poster": poster_url,
+            "description": description or (f"Davlat: {country}" if country else ""),
+            "watchUrl": f"https://t.me/{bot_username}?start={code}" if bot_username else "",
+        })
+
+    write_local_catalog(movies_path, catalog)
+
+
+def sync_all_movies_to_local_site(bot_username: str | None) -> None:
+    movies_path, _ = local_site_paths()
+    catalog = read_local_catalog(movies_path)
+    with connect_db() as db:
+        rows = db.execute(
+            "SELECT m.code, m.title, m.genre, m.year, m.country, m.description, "
+            "(SELECT COUNT(*) FROM movie_parts p WHERE p.code = m.code) "
+            "FROM movies m ORDER BY m.created_at DESC, m.rowid DESC"
+        ).fetchall()
+
+    for code, title, genre, year, country, description, part_count in reversed(rows):
+        previous = next(
+            (item for item in catalog if isinstance(item, dict) and str(item.get("code", "")) == str(code)),
+            {},
+        )
+        catalog = [
+            item for item in catalog
+            if not (isinstance(item, dict) and str(item.get("code", "")) == str(code))
+        ]
+        catalog.insert(0, {
+            "code": str(code),
+            "title": title or f"Kino {code}",
+            "year": int(year) if year and year.isdigit() else "",
+            "genre": genre or "Kino",
+            "rating": previous.get("rating", "—"),
+            "duration": f"{part_count} qism" if part_count > 1 else "",
+            "poster": previous.get("poster", ""),
+            "description": description or (f"Davlat: {country}" if country else ""),
+            "watchUrl": f"https://t.me/{bot_username}?start={code}" if bot_username else "",
+        })
+    write_local_catalog(movies_path, catalog)
+
+
+async def github_json_request(method: str, url: str, **kwargs):
+    """Make one GitHub Contents API request without logging credentials."""
+    if not SITE_GITHUB_TOKEN:
+        raise RuntimeError("SITE_GITHUB_TOKEN is not configured")
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "Authorization": f"Bearer {SITE_GITHUB_TOKEN}",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    headers.update(kwargs.pop("headers", {}))
+    timeout = aiohttp.ClientTimeout(total=30)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.request(method, url, headers=headers, **kwargs) as response:
+            payload = await response.json(content_type=None)
+            if response.status >= 400:
+                detail = payload.get("message", "GitHub API request failed") if isinstance(payload, dict) else "GitHub API request failed"
+                raise RuntimeError(f"GitHub API returned {response.status}: {detail}")
+            return payload
+
+
+def github_contents_url(path: str) -> str:
+    repo = quote(SITE_GITHUB_REPO, safe="/")
+    encoded_path = quote(path, safe="/")
+    return f"https://api.github.com/repos/{repo}/contents/{encoded_path}"
+
+
+async def put_github_file(path: str, content: bytes, message: str) -> None:
+    url = github_contents_url(path)
+    params = {"ref": SITE_GITHUB_BRANCH}
+    sha = None
+    try:
+        existing = await github_json_request("GET", url, params=params)
+        sha = existing.get("sha")
+    except RuntimeError as error:
+        if "returned 404" not in str(error):
+            raise
+    body = {
+        "message": message,
+        "content": base64.b64encode(content).decode("ascii"),
+        "branch": SITE_GITHUB_BRANCH,
+    }
+    if sha:
+        body["sha"] = sha
+    await github_json_request("PUT", url, json=body)
+
+
+async def sync_movie_to_site(
+    code: str, bot_username: str | None, poster_bytes: bytes | None = None
+) -> bool:
+    """Publish bot catalog metadata to the static site repository."""
+    if SITE_LOCAL_MOVIES_PATH:
+        try:
+            sync_movie_to_local_site(code, bot_username, poster_bytes)
+            logger.info("Synced movie %s to local website catalog", code)
+            return True
+        except Exception:
+            logger.exception("Could not sync movie %s to local website", code)
+            return False
+    if not SITE_GITHUB_REPO or not SITE_GITHUB_TOKEN:
+        logger.info("Website sync skipped; SITE_GITHUB_REPO or SITE_GITHUB_TOKEN is not set")
+        return False
+    try:
+        with connect_db() as db:
+            row = db.execute(
+                "SELECT title, genre, year, country, description FROM movies WHERE code = ?",
+                (code,),
+            ).fetchone()
+            part_count = db.execute(
+                "SELECT COUNT(*) FROM movie_parts WHERE code = ?", (code,)
+            ).fetchone()[0]
+        owner, repo_name = SITE_GITHUB_REPO.split("/", 1)
+        poster_url = (
+            f"https://raw.githubusercontent.com/{owner}/{repo_name}/"
+            f"{quote(SITE_GITHUB_BRANCH, safe='')}/{SITE_POSTERS_PATH}/{code}.jpg"
+        )
+        if poster_bytes and row:
+            await put_github_file(
+                f"{SITE_POSTERS_PATH}/{code}.jpg",
+                poster_bytes,
+                f"Add poster for movie {code}",
+            )
+        catalog_url = github_contents_url(SITE_MOVIES_PATH)
+        existing = await github_json_request(
+            "GET", catalog_url, params={"ref": SITE_GITHUB_BRANCH}
+        )
+        catalog = json.loads(base64.b64decode(existing["content"]).decode("utf-8"))
+        if not isinstance(catalog, list):
+            raise ValueError(f"{SITE_MOVIES_PATH} must contain a JSON list")
+        catalog = [item for item in catalog if not (isinstance(item, dict) and str(item.get("code", "")) == code)]
+        if row:
+            title, genre, year, country, description = row
+            previous = next(
+                (item for item in json.loads(base64.b64decode(existing["content"]).decode("utf-8"))
+                 if isinstance(item, dict) and str(item.get("code", "")) == code),
+                {},
+            )
+            movie = {
+                "code": code,
+                "title": title or f"Kino {code}",
+                "year": int(year) if year and year.isdigit() else "",
+                "genre": genre or "Kino",
+                "rating": previous.get("rating", "—"),
+                "duration": f"{part_count} qism" if part_count > 1 else "",
+                "poster": poster_url if poster_bytes else previous.get("poster", ""),
+                "description": description or (f"Davlat: {country}" if country else ""),
+                "watchUrl": f"https://t.me/{bot_username}?start={code}" if bot_username else "",
+            }
+            catalog.insert(0, movie)
+        await put_github_file(
+            SITE_MOVIES_PATH,
+            (json.dumps(catalog, ensure_ascii=False, indent=2) + "\n").encode("utf-8"),
+            f"Publish movie {code} to site catalog",
+        )
+        logger.info("Synced movie %s to website catalog", code)
+        return True
+    except Exception:
+        logger.exception("Could not sync movie %s to website", code)
+        return False
+
+
+async def sync_all_movies_to_site(bot_username: str | None) -> None:
+    """Refresh existing bot entries in the website catalog on startup."""
+    if SITE_LOCAL_MOVIES_PATH:
+        try:
+            sync_all_movies_to_local_site(bot_username)
+            logger.info("Synced existing movies to local website catalog")
+        except Exception:
+            logger.exception("Could not sync existing bot movies to local website")
+        return
+    if not SITE_GITHUB_REPO or not SITE_GITHUB_TOKEN:
+        return
+    try:
+        with connect_db() as db:
+            rows = db.execute(
+                "SELECT m.code, m.title, m.genre, m.year, m.country, m.description, "
+                "(SELECT COUNT(*) FROM movie_parts p WHERE p.code = m.code) "
+                "FROM movies m ORDER BY m.created_at DESC, m.rowid DESC"
+            ).fetchall()
+        catalog_url = github_contents_url(SITE_MOVIES_PATH)
+        existing = await github_json_request(
+            "GET", catalog_url, params={"ref": SITE_GITHUB_BRANCH}
+        )
+        catalog = json.loads(base64.b64decode(existing["content"]).decode("utf-8"))
+        if not isinstance(catalog, list):
+            raise ValueError(f"{SITE_MOVIES_PATH} must contain a JSON list")
+        bot_codes = {str(row[0]) for row in rows}
+        catalog = [
+            item for item in catalog
+            if not (isinstance(item, dict) and str(item.get("code", "")) in bot_codes)
+        ]
+        previous_by_code = {
+            str(item.get("code", "")): item
+            for item in json.loads(base64.b64decode(existing["content"]).decode("utf-8"))
+            if isinstance(item, dict)
+        }
+        for code, title, genre, year, country, description, part_count in rows:
+            previous = previous_by_code.get(str(code), {})
+            catalog.append({
+                "code": str(code),
+                "title": title or f"Kino {code}",
+                "year": int(year) if year and year.isdigit() else "",
+                "genre": genre or "Kino",
+                "rating": previous.get("rating", "—"),
+                "duration": f"{part_count} qism" if part_count > 1 else "",
+                "poster": previous.get("poster", ""),
+                "description": description or (f"Davlat: {country}" if country else ""),
+                "watchUrl": f"https://t.me/{bot_username}?start={code}" if bot_username else "",
+            })
+        await put_github_file(
+            SITE_MOVIES_PATH,
+            (json.dumps(catalog, ensure_ascii=False, indent=2) + "\n").encode("utf-8"),
+            "Sync bot movie catalog to website",
+        )
+        logger.info("Synced %s existing bot movies to website", len(rows))
+    except Exception:
+        logger.exception("Could not sync existing bot movies to website")
 
 
 def connect_db() -> sqlite3.Connection:
@@ -464,6 +762,7 @@ async def add_movie(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
 
     channel_message_id = None
+    poster_bytes = None
     if CHANNEL_ID:
         channel_caption = make_channel_caption(code, metadata, 1)
         reply_markup = movie_keyboard(context.bot.username, code)
@@ -518,14 +817,23 @@ async def add_movie(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await message.reply_text("Eslatma: CHANNEL_ID sozlanmagan, kanalga e’lon yuborilmadi.")
         return
 
+    site_synced = await sync_movie_to_site(
+        code, context.bot.username, bytes(poster_bytes) if poster_bytes else None
+    )
+    site_note = (
+        " Sayt katalogiga ham qo‘shildi."
+        if site_synced
+        else " Saytga qo‘shilmadi: bot serverida SITE_GITHUB_REPO va SITE_GITHUB_TOKEN sozlamalarini kiriting."
+    )
+
     if message.video.thumbnail:
         await message.reply_text(
-            f"✅ {metadata['title'] or 'Kino'} (kod: {code}) saqlandi. "
+            f"✅ {metadata['title'] or 'Kino'} (kod: {code}) saqlandi.{site_note} "
             "Bu 1-qism. Davomlarini shu kod bilan /part captionida yuboring."
         )
     else:
         await message.reply_text(
-            f"✅ Kino (kod: {code}) saqlandi. Telegram bu videoga preview bermadi, "
+            f"✅ Kino (kod: {code}) saqlandi.{site_note} Telegram bu videoga preview bermadi, "
             "kanalga ma’lumotli matn joylandi. Davomlarini /part bilan yuboring."
         )
 
@@ -600,9 +908,12 @@ async def add_movie_part(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             except Exception:
                 logger.exception("Could not update catalog count for movie %s", code)
 
+    site_synced = await sync_movie_to_site(code, context.bot.username)
+
     label = title or f"Kino {code}"
     await message.reply_text(
-        f"✅ {label}: {part_no}-qism qo‘shildi. Jami {part_count} ta qism bo‘ldi."
+        f"✅ {label}: {part_no}-qism qo‘shildi. Jami {part_count} ta qism bo‘ldi. "
+        + ("Sayt yangilandi." if site_synced else "Sayt yangilanmadi; GitHub sync sozlamalarini tekshiring.")
     )
 
 
@@ -657,17 +968,23 @@ async def remove_movie_record(code: str, context: ContextTypes.DEFAULT_TYPE) -> 
         db.execute("DELETE FROM movies WHERE code = ?", (code,))
 
     label = title.strip() if title and title.strip() else "Nomsiz kino"
+    result = ""
     if CHANNEL_ID and channel_message_id:
         try:
             await context.bot.delete_message(
                 chat_id=CHANNEL_ID,
                 message_id=channel_message_id,
             )
-            return f"🗑 Kino o‘chirildi: {label} (kod: {code})."
+            result = f"🗑 Kino o‘chirildi: {label} (kod: {code})."
         except Exception:
             logger.exception("Could not delete channel post for movie %s", code)
-            return f"Kino bazadan o‘chirildi: {label} (kod: {code}), lekin kanal postini o‘chira olmadim."
-    return f"Kino bazadan o‘chirildi: {label} (kod: {code}). Eski kanal postini qo‘lda o‘chiring."
+            result = f"Kino bazadan o‘chirildi: {label} (kod: {code}), lekin kanal postini o‘chira olmadim."
+    else:
+        result = f"Kino bazadan o‘chirildi: {label} (kod: {code}). Eski kanal postini qo‘lda o‘chiring."
+    site_synced = await sync_movie_to_site(code, context.bot.username)
+    if not site_synced:
+        result += " Sayt katalogi yangilanmadi; GitHub sync sozlamalarini tekshiring."
+    return result
 
 
 async def confirm_delete_latest(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -800,6 +1117,7 @@ async def run_bot_and_server() -> None:
     tg_app.add_error_handler(error_handler)
 
     await tg_app.initialize()
+    await sync_all_movies_to_site(tg_app.bot.username)
     await tg_app.bot.set_my_commands(
         [
             BotCommand("start", "Botni boshlash"),

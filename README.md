@@ -4,6 +4,42 @@ Admin botga kod va nom bilan video yuboradi. Bot kanalga videodan olingan previe
 
 Botdan foydalanishdan oldin foydalanuvchi katalog kanaliga a’zo bo‘lishi kerak. Bot a’zolikni tekshiradi va a’zo bo‘lmaganlarga kanalga qo‘shilish tugmasini ko‘rsatadi.
 
+## Sayt katalogiga avtomatik chiqarish
+
+Bot `/add` bilan yangi kino qo‘shganda yoki `/part` bilan qism qo‘shganda, sayt repository’sidagi `movies.json` faylini yangilaydi. `/delete` saytdagi yozuvni ham o‘chiradi. Kanalga post yuborish jarayoni o‘zgarishsiz qoladi. Saytdagi tugma filmni botda olish uchun ochadi; video fayl Telegram `file_id` orqali botda saqlanadi.
+
+### Mahalliy serverda tekshirish
+
+Bot va Live Server bir kompyuterda ishlasa, `.env` faylida `SITE_LOCAL_MOVIES_PATH=../movies.json` va `SITE_LOCAL_POSTERS_PATH=../posters` bo‘lsin. Botni qayta ishga tushiring. Bot bazasidagi mavjud kinolar saytga yoziladi; botni ochiq qoldirsangiz, yangi `/add 123` dan keyin sayt katalogi 15 soniya ichida yangilanadi.
+
+Bot boshqa serverda ishlasa, bu mahalliy yo‘l yordam bermaydi: masofadagi server kompyuteringizdagi faylni o‘zgartira olmaydi. Unda GitHub’ga yozadigan quyidagi ulash sozlamalarini ishlating.
+
+Ulash uchun:
+
+1. Sayt fayllarini (shu jumladan yangilangan bo‘sh `movies.json` faylini) sayt repository’sining `main` branch root papkasiga yuklang. GitHub Pages ham `main` branch va `/` papkadan chiqarilsin.
+2. GitHub’da fine-grained access token yarating. Uni faqat sayt repository’siga cheklab, **Contents: Read and write** huquqini bering.
+3. Bot ishlayotgan hostdagi environment variables’ga quyidagilarni kiriting:
+   - `SITE_GITHUB_REPO` — `egasi/repository` ko‘rinishida.
+   - `SITE_GITHUB_TOKEN` — maxfiy token.
+   - `SITE_GITHUB_BRANCH` — sayt branch’i, odatda `main`.
+   - `SITE_MOVIES_PATH` — `movies.json`.
+   - `SITE_POSTERS_PATH` — `posters`.
+4. Botni qayta deploy qiling. Keyingi `/add` buyrug‘ida sayt repository’siga commit yoziladi va GitHub Pages yangilanadi.
+
+Tokenni kodga yozmang yoki chatga yubormang. Railway’da bu qiymatlarni service’ning **Variables** bo‘limiga kiriting. Boshqa hostda uning secret/environment variables bo‘limidan foydalaning.
+
+### Render’da sozlash
+
+Render’dagi bot kompyuteringizda ishlamaydi; `SITE_LOCAL_MOVIES_PATH` kabi mahalliy fayl yo‘li Render’da sayt faylingizga olib bormaydi. Avval sayt fayllarini GitHub repository’ga yuklab, GitHub Pages’ni yoqing. Keyin:
+
+1. Bot kodidagi bu o‘zgarishlarni botning GitHub repository’siga yuboring. Render’da **Manual Deploy → Deploy latest commit** ni bosing yoki avtomatik deploy tugashini kuting.
+2. Render Dashboard → bot service → **Environment** bo‘limida `SITE_GITHUB_REPO=egasi/repository` qo‘shing.
+3. `SITE_GITHUB_TOKEN` ga faqat sayt repository’siga **Contents: Read and write** huquqi berilgan GitHub token kiriting.
+4. `SITE_GITHUB_BRANCH=main`, `SITE_MOVIES_PATH=movies.json`, `SITE_POSTERS_PATH=posters` qiymatlarini qo‘shing. Render’da `SITE_LOCAL_MOVIES_PATH` o‘rnatilmagan bo‘lsin.
+5. O‘zgarishlarni saqlab, Render service’ni qayta ishga tushiring. Bot ishga tushganda bazasidagi mavjud kinolarni, keyinchalik `/add` bilan qo‘shilgan kinolarni saytga yuboradi.
+
+Bot va sayt fayllarini alohida GitHub repository’larda saqlash qulay. Tokenni `.env` fayliga yozib commit qilmang; faqat Render’ning **Environment** bo‘limiga kiriting.
+
 ## Ishga tushirish
 
 1. [@BotFather](https://t.me/BotFather) orqali bot yarating va token oling.
@@ -32,8 +68,8 @@ Loyiha Railway CLI bilan to‘g‘ridan-to‘g‘ri joylashga tayyor. Railway ak
    ```
 
 2. `railway up` buyrug‘ini bajaring. Brauzerda Railway akkauntiga kiring va loyiha yaratishni tasdiqlang. Bu buyruq ushbu papkani Railway’ga yuklaydi va deploy qiladi.
-3. Railway dashboard’da bot service’ni tanlab, Variables bo‘limida `BOT_TOKEN`, `CHANNEL_ID`, `CHANNEL_URL`, `ADMIN_IDS` qiymatlarini kiriting. `.env` faylini deploy’ga qo‘shmang.
-4. Service’га volume қўшиб, mount path’ни `/data` қилиб белгиланг. Bot kino kodlari bazasini `/data/movies.db` da saqlaydi; volume bo‘lmasa deploy paytida baza yo‘qolishi mumkin.
+3. Railway dashboard’da bot service’ni tanlab, Variables bo‘limida `BOT_TOKEN`, `CHANNEL_ID`, `CHANNEL_URL`, `ADMIN_IDS` va yuqoridagi `SITE_GITHUB_*` qiymatlarini kiriting. `.env` faylini deploy’ga qo‘shmang.
+4. Service’ga volume qo‘shib, mount path’ni `/data` qilib belgilang. Bot kino kodlarini `/data/movies.db` faylida saqlaydi; volume bo‘lmasa deploy paytida baza yo‘qolishi mumkin.
 5. Deploy logs’da `Application started` ko‘ringandan keyin bot 24/7 ishlaydi. Laptopni va VS Code’ni ochiq qoldirish shart emas.
 
 ## Kino qo‘shish
