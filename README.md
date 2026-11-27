@@ -1,6 +1,6 @@
 # Kino kodlari Telegram bot
 
-Admin botga kod va nom bilan video yuboradi. Bot kanalga videodan olingan preview rasmini nomi va kodi bilan joylaydi; to‘liq video kanalga yuborilmaydi. Foydalanuvchi kodni botga yuborishi yoki kanaldagi **Botda olish** tugmasini bosishi mumkin.
+Admin botga kod va nom bilan video yuboradi. Kanalga videodan olingan rasm, kino kodi va ma’lumotlari chiqadi; to‘liq video kanalga yuborilmaydi. Saytdagi film kartasini bosgan foydalanuvchi kinoni bot orqali oladi.
 
 Botdan foydalanishdan oldin foydalanuvchi katalog kanaliga a’zo bo‘lishi kerak. Bot a’zolikni tekshiradi va a’zo bo‘lmaganlarga kanalga qo‘shilish tugmasini ko‘rsatadi.
 
@@ -85,7 +85,7 @@ Davlat: O‘zbekiston
 Tavsif: Qisqacha mazmuni shu yerda.
 ```
 
-Keyingi qismlarni alohida video qilib yuboring va har birining captioniga `/part 122` deb yozing. Bot ularni yuborilgan tartibda raqamlaydi. Kanalda faqat videodan olingan preview rasmi (yoki preview bo‘lmasa matnli e’lon) va kino ma’lumotlari chiqadi; kino videosi kanalga yuborilmaydi. Kanal posti qism soni o‘zgarganda yangilanadi.
+Keyingi qismlarni alohida video qilib yuboring va har birining captioniga `/part 122` deb yozing. Bot ularni yuborilgan tartibda raqamlaydi. Kanal postida rasm va kino ma’lumotlari bo‘ladi; qism soni o‘zgarganda post tavsifi yangilanadi.
 
 Foydalanuvchi botga `122` yuborsa, avval kino ma’lumotlari, so‘ng barcha qismlar tartib bilan keladi. `/info 122` faqat ma’lumotlarni ko‘rsatadi. Admin `/delete 122` bilan kinoni va uning barcha qismlarini o‘chirishi mumkin. Mavjud kodga `/add` bilan qayta yuborish eski qismlarni almashtiradi; yangi qism qo‘shish uchun doim `/part` ishlating.
 

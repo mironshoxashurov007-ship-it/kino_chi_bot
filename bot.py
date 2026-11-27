@@ -763,19 +763,21 @@ async def add_movie(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     channel_message_id = None
     poster_bytes = None
+    poster_posted = False
     if CHANNEL_ID:
         channel_caption = make_channel_caption(code, metadata, 1)
         reply_markup = movie_keyboard(context.bot.username, code)
+        poster = message.video.thumbnail
+        if poster:
+            try:
+                poster_file = await context.bot.get_file(poster.file_id)
+                poster_bytes = await poster_file.download_as_bytearray()
+            except Exception:
+                logger.exception("Could not download preview image for code %s", code)
+
         try:
-            # Use Telegram's video preview frame as a still photo. Never publish
-            # the original video to the catalog channel. Telegram thumbnail
-            # file_ids cannot be reused directly, so upload the downloaded
-            # preview bytes as a new photo.
-            poster = message.video.thumbnail
-            if poster:
+            if poster_bytes:
                 try:
-                    poster_file = await context.bot.get_file(poster.file_id)
-                    poster_bytes = await poster_file.download_as_bytearray()
                     posted_message = await context.bot.send_photo(
                         chat_id=CHANNEL_ID,
                         photo=InputFile(bytes(poster_bytes), filename=f"movie-{code}.jpg"),
@@ -783,8 +785,9 @@ async def add_movie(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                         parse_mode=ParseMode.HTML,
                         reply_markup=reply_markup,
                     )
+                    poster_posted = True
                 except Exception:
-                    logger.exception("Could not upload preview image for code %s; posting text", code)
+                    logger.exception("Could not post poster for code %s; sending text notice", code)
                     posted_message = await context.bot.send_message(
                         chat_id=CHANNEL_ID,
                         text=channel_caption,
@@ -792,8 +795,6 @@ async def add_movie(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                         reply_markup=reply_markup,
                     )
             else:
-                # Some video messages have no preview image; keep the code
-                # visible without accidentally posting the full movie.
                 posted_message = await context.bot.send_message(
                     chat_id=CHANNEL_ID,
                     text=channel_caption,
@@ -809,7 +810,7 @@ async def add_movie(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         except Exception:
             logger.exception("Could not publish code %s to channel", code)
             await message.reply_text(
-                f"Kino {code} saqlandi, lekin kanalga e’lon chiqmay qoldi. "
+                f"Kino {code} bot bazasida saqlandi, lekin kanalga rasmli e’lon yuborilmadi. "
                 "Bot kanal admini ekanini va CHANNEL_ID to‘g‘riligini tekshiring."
             )
             return
@@ -825,16 +826,21 @@ async def add_movie(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if site_synced
         else " Saytga qo‘shilmadi: bot serverida SITE_GITHUB_REPO va SITE_GITHUB_TOKEN sozlamalarini kiriting."
     )
+    channel_note = (
+        "Kanalga kino rasmi yuborildi."
+        if poster_posted
+        else "Videoda rasm preview yo‘q edi; kanalga matnli e’lon yuborildi."
+    )
 
     if message.video.thumbnail:
         await message.reply_text(
             f"✅ {metadata['title'] or 'Kino'} (kod: {code}) saqlandi.{site_note} "
-            "Bu 1-qism. Davomlarini shu kod bilan /part captionida yuboring."
+            f"{channel_note} To‘liq videoni bot orqali olish mumkin. Bu 1-qism; davomlarini shu kod bilan /part captionida yuboring."
         )
     else:
         await message.reply_text(
             f"✅ Kino (kod: {code}) saqlandi.{site_note} Telegram bu videoga preview bermadi, "
-            "kanalga ma’lumotli matn joylandi. Davomlarini /part bilan yuboring."
+            f"{channel_note} Sayt kartasida standart rasm ko‘rsatiladi. Davomlarini /part bilan yuboring."
         )
 
 
